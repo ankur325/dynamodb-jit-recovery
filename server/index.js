@@ -8,8 +8,7 @@ import {
   ListTablesCommand,
   RestoreTableToPointInTimeCommand,
   ScanCommand,
-  waitUntilTableExists,
-  waitUntilTableNotExists
+  waitUntilTableExists
 } from '@aws-sdk/client-dynamodb';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { unmarshall } from '@aws-sdk/util-dynamodb';
@@ -217,84 +216,6 @@ app.post('/api/pitr/recover', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: error.message, details: error });
-  }
-});
-
-app.post('/api/pitr/replace-current', async (req, res) => {
-  const { tableName, restoreIsoTime, archiveCurrentTable = true, archiveTableName } = req.body;
-
-  if (!tableName || !restoreIsoTime) {
-    return res.status(400).json({ message: 'tableName and restoreIsoTime are required.' });
-  }
-
-  if (archiveCurrentTable && !archiveTableName) {
-    return res.status(400).json({ message: 'archiveTableName is required when archiveCurrentTable is true.' });
-  }
-
-  try {
-    const backupStatus = await client.send(
-      new DescribeContinuousBackupsCommand({ TableName: tableName })
-    );
-
-    const pitrStatus = backupStatus.ContinuousBackupsDescription?.PointInTimeRecoveryDescription?.PointInTimeRecoveryStatus;
-    if (pitrStatus !== 'ENABLED') {
-      return res.status(400).json({ message: `PITR is not enabled for ${tableName}.` });
-    }
-
-    if (archiveCurrentTable) {
-      await client.send(
-        new RestoreTableToPointInTimeCommand({
-          SourceTableName: tableName,
-          TargetTableName: archiveTableName,
-          UseLatestRestorableTime: true
-        })
-      );
-
-      await waitUntilTableExists(
-        {
-          client,
-          maxWaitTime: 300
-        },
-        { TableName: archiveTableName }
-      );
-    }
-
-    await client.send(new DeleteTableCommand({ TableName: tableName }));
-
-    await waitUntilTableNotExists(
-      {
-        client,
-        maxWaitTime: 300
-      },
-      { TableName: tableName }
-    );
-
-    await client.send(
-      new RestoreTableToPointInTimeCommand({
-        SourceTableName: tableName,
-        TargetTableName: tableName,
-        RestoreDateTime: new Date(restoreIsoTime),
-        UseLatestRestorableTime: false
-      })
-    );
-
-    await waitUntilTableExists(
-      {
-        client,
-        maxWaitTime: 300
-      },
-      { TableName: tableName }
-    );
-
-    return res.json({
-      message: `Replaced ${tableName} with PITR snapshot from ${restoreIsoTime}.`,
-      tableName,
-      restoreIsoTime,
-      archiveCurrentTable,
-      archiveTableName: archiveCurrentTable ? archiveTableName : null
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message, details: error });
   }
 });
 

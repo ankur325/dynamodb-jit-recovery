@@ -36,8 +36,6 @@ export default function App() {
   const [status, setStatus] = useState('Press "Load tables" to begin.');
   const [loading, setLoading] = useState(false);
   const [targetTableName, setTargetTableName] = useState('');
-  const [archiveTableName, setArchiveTableName] = useState('');
-  const [archiveCurrentTable, setArchiveCurrentTable] = useState(true);
 
   const tempTableName = useMemo(() => {
     if (!selectedTable) return '';
@@ -98,41 +96,6 @@ export default function App() {
         })
       });
 
-      setStatus(data.message);
-    } catch (error) {
-      setStatus(error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const replaceCurrentTable = async () => {
-    if (!selectedTable) return;
-
-    if (archiveCurrentTable && !archiveTableName) {
-      setStatus('Provide an archive table name to keep the current state before replacement.');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `This will DELETE and replace ${selectedTable}. Continue?`
-    );
-
-    if (!confirmed) return;
-
-    setLoading(true);
-    setStatus(`Replacing ${selectedTable} with PITR snapshot...`);
-    try {
-      const restoreIsoTime = new Date(restoreTime).toISOString();
-      const data = await api('/api/pitr/replace-current', {
-        method: 'POST',
-        body: JSON.stringify({
-          tableName: selectedTable,
-          restoreIsoTime,
-          archiveCurrentTable,
-          archiveTableName: archiveCurrentTable ? archiveTableName : undefined
-        })
-      });
       setStatus(data.message);
     } catch (error) {
       setStatus(error.message);
@@ -240,35 +203,6 @@ export default function App() {
         </label>
         <button className="danger" onClick={recover} disabled={loading || !selectedTable || !targetTableName}>
           Restore now
-        </button>
-      </Section>
-
-      <Section title="4) Replace current table (destructive)">
-        <p className="subtle">
-          DynamoDB cannot restore in-place directly. This action deletes the current table, then restores the PITR
-          snapshot back into the same table name.
-        </p>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={archiveCurrentTable}
-            onChange={(event) => setArchiveCurrentTable(event.target.checked)}
-          />
-          Archive current state first (recommended)
-        </label>
-        {archiveCurrentTable && (
-          <label>
-            Archive table name
-            <input
-              type="text"
-              placeholder={`${selectedTable || 'table'}-pre-replace-${new Date().toISOString().slice(0, 10)}`}
-              value={archiveTableName}
-              onChange={(event) => setArchiveTableName(event.target.value)}
-            />
-          </label>
-        )}
-        <button className="danger" onClick={replaceCurrentTable} disabled={loading || !selectedTable}>
-          Replace current table with selected PITR time
         </button>
       </Section>
 
