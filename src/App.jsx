@@ -1,0 +1,222 @@
+import { useMemo, useState } from 'react';
+
+const api = async (path, options) => {
+  const response = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    throw new Error(errorBody.message || `Request failed: ${response.status}`);
+  }
+
+  return response.json();
+};
+
+const isoDateTimeInputValue = () => {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  return now.toISOString().slice(0, 16);
+};
+
+const Section = ({ title, children }) => (
+  <section className="section">
+    <h2>{title}</h2>
+    {children}
+  </section>
+);
+
+export default function App() {
+  const [tables, setTables] = useState([]);
+  const [region, setRegion] = useState('');
+  const [selectedTable, setSelectedTable] = useState('');
+  const [restoreTime, setRestoreTime] = useState(isoDateTimeInputValue());
+  const [preview, setPreview] = useState(null);
+  const [status, setStatus] = useState('Press "Load tables" to begin.');
+  const [loading, setLoading] = useState(false);
+  const [targetTableName, setTargetTableName] = useState('');
+
+  const tempTableName = useMemo(() => {
+    if (!selectedTable) return '';
+    return `${selectedTable}-preview-${Date.now()}`;
+  }, [selectedTable]);
+
+  const loadTables = async () => {
+    setLoading(true);
+    setStatus('Loading DynamoDB tables using local AWS credentials...');
+    try {
+      const data = await api('/api/tables');
+      setTables(data.tables);
+      setRegion(data.region);
+      setStatus(`Loaded ${data.tables.length} tables from ${data.region}.`);
+    } catch (error) {
+      setStatus(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const previewRecovery = async () => {
+    if (!selectedTable) return;
+    setLoading(true);
+    setStatus('Creating temporary restored table and diffing item-level changes...');
+    setPreview(null);
+    try {
+      const restoreIsoTime = new Date(restoreTime).toISOString();
+      const data = await api('/api/pitr/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          tableName: selectedTable,
+          restoreIsoTime,
+          tempTableName
+        })
+      });
+      setPreview(data);
+      setStatus('Preview complete. Inspect differences below, then recover or cleanup.');
+    } catch (error) {
+      setStatus(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const recover = async () => {
+    if (!selectedTable || !targetTableName) return;
+    setLoading(true);
+    setStatus(`Starting recovery into ${targetTableName}...`);
+    try {
+      const restoreIsoTime = new Date(restoreTime).toISOString();
+      const data = await api('/api/pitr/recover', {
+        method: 'POST',
+        body: JSON.stringify({
+          tableName: selectedTable,
+          restoreIsoTime,
+          targetTableName
+        })
+      });
+
+      setStatus(data.message);
+    } catch (error) {
+      setStatus(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cleanupPreviewTable = async () => {
+    if (!preview?.tempTableName) return;
+    setLoading(true);
+    setStatus(`Deleting temporary table ${preview.tempTableName}...`);
+    try {
+      const data = await api(`/api/table/${preview.tempTableName}`, { method: 'DELETE' });
+      setStatus(`${data.message}. You can now run another preview safely.`);
+    } catch (error) {
+      setStatus(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main>
+      <h1>DynamoDB PITR Recovery Assistant</h1>
+      <p className="subtle">
+        Interactive preview tool: compare the current table against a point-in-time restore, then recover with confidence.
+      </p>
+
+      <Section title="1) Select table and restore time">
+        <div className="row">
+          <button onClick={loadTables} disabled={loading}>Load tables</button>
+          <span>Region: <strong>{region || 'Unknown'}</strong></span>
+        </div>
+
+        <label>
+          Table
+          <select
+            value={selectedTable}
+            onChange={(event) => {
+              setSelectedTable(event.target.value);
+              setPreview(null);
+            }}
+          >
+            <option value="">-- choose table --</option>
+            {tables.map((tableName) => (
+              <option value={tableName} key={tableName}>{tableName}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Restore timestamp
+          <input
+            type="datetime-local"
+            value={restoreTime}
+            onChange={(event) => setRestoreTime(event.target.value)}
+          />
+        </label>
+
+        <button className="primary" onClick={previewRecovery} disabled={loading || !selectedTable}>
+          Preview exact differences (creates temporary table)
+        </button>
+      </Section>
+
+      {preview && (
+        <Section title="2) Review exact differences">
+          <div className="stats">
+            <div><span>Current items</span><strong>{preview.currentItemCount}</strong></div>
+            <div><span>Recovered items</span><strong>{preview.recoveredItemCount}</strong></div>
+            <div><span>Only in current</span><strong>{preview.onlyInCurrentCount}</strong></div>
+            <div><span>Only in recovered</span><strong>{preview.onlyInRecoveredCount}</strong></div>
+            <div><span>Changed</span><strong>{preview.changedCount}</strong></div>
+          </div>
+
+          <details open>
+            <summary>Sample: rows present only now</summary>
+            <pre>{JSON.stringify(preview.samples.onlyInCurrent, null, 2)}</pre>
+          </details>
+          <details>
+            <summary>Sample: rows that would come back after restore</summary>
+            <pre>{JSON.stringify(preview.samples.onlyInRecovered, null, 2)}</pre>
+          </details>
+          <details>
+            <summary>Sample: rows with changed values</summary>
+            <pre>{JSON.stringify(preview.samples.changed, null, 2)}</pre>
+          </details>
+
+          <div className="row">
+            <button onClick={cleanupPreviewTable} disabled={loading}>Cleanup temporary preview table</button>
+            <span>{preview.tempTableName}</span>
+          </div>
+        </Section>
+      )}
+
+      <Section title="3) Recover into a new table">
+        <label>
+          Target restored table name
+          <input
+            type="text"
+            placeholder="my-table-restore-2026-04-24"
+            value={targetTableName}
+            onChange={(event) => setTargetTableName(event.target.value)}
+          />
+        </label>
+        <button className="danger" onClick={recover} disabled={loading || !selectedTable || !targetTableName}>
+          Restore now
+        </button>
+      </Section>
+
+      <Section title="Status">
+        <p>{status}</p>
+      </Section>
+
+      <Section title="Notes">
+        <ul>
+          <li>Preview runs an actual point-in-time restore to a temporary table, so it may take minutes and incur DynamoDB costs.</li>
+          <li>DynamoDB PITR can only restore into a new table; this app follows that model for safety.</li>
+          <li>Use IAM permissions for List/Describe/Scan/Restore/Delete table operations.</li>
+        </ul>
+      </Section>
+    </main>
+  );
+}
