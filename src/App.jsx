@@ -36,30 +36,11 @@ export default function App() {
   const [status, setStatus] = useState('Press "Load tables" to begin.');
   const [loading, setLoading] = useState(false);
   const [targetTableName, setTargetTableName] = useState('');
-  const [archiveTableName, setArchiveTableName] = useState('');
-  const [archiveCurrentTable, setArchiveCurrentTable] = useState(true);
-  const [previewMode, setPreviewMode] = useState('pitr');
-  const [comparisonTableName, setComparisonTableName] = useState('');
 
   const tempTableName = useMemo(() => {
     if (!selectedTable) return '';
     return `${selectedTable}-preview-${Date.now()}`;
   }, [selectedTable]);
-
-  const pollOperationUntilDone = async (operationId) => {
-    // Keep polling for long-running DynamoDB restore operations.
-    while (true) {
-      const operation = await api(`/api/operations/${operationId}`);
-      if (operation.status === 'succeeded') {
-        return operation.result;
-      }
-      if (operation.status === 'failed') {
-        throw new Error(operation?.error?.message || 'Long-running operation failed.');
-      }
-      setStatus(operation.progressMessage || 'Still running...');
-      await new Promise((resolve) => setTimeout(resolve, 4000));
-    }
-  };
 
   const loadTables = async () => {
     setLoading(true);
@@ -79,29 +60,18 @@ export default function App() {
   const previewRecovery = async () => {
     if (!selectedTable) return;
     setLoading(true);
-    setStatus(
-      previewMode === 'pitr'
-        ? 'Creating temporary restored table and diffing item-level changes...'
-        : 'Diffing current table with selected comparison table...'
-    );
+    setStatus('Creating temporary restored table and diffing item-level changes...');
     setPreview(null);
     try {
       const restoreIsoTime = new Date(restoreTime).toISOString();
-      const payload = previewMode === 'existing-table'
-        ? {
-            tableName: selectedTable,
-            comparisonTableName
-          }
-        : {
-            tableName: selectedTable,
-            restoreIsoTime,
-            tempTableName
-          };
-      const start = await api('/api/pitr/preview/start', {
+      const data = await api('/api/pitr/preview', {
         method: 'POST',
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          tableName: selectedTable,
+          restoreIsoTime,
+          tempTableName
+        })
       });
-      const data = await pollOperationUntilDone(start.operationId);
       setPreview(data);
       setStatus('Preview complete. Inspect differences below, then recover or cleanup.');
     } catch (error) {
@@ -117,7 +87,7 @@ export default function App() {
     setStatus(`Starting recovery into ${targetTableName}...`);
     try {
       const restoreIsoTime = new Date(restoreTime).toISOString();
-      const start = await api('/api/pitr/recover/start', {
+      const data = await api('/api/pitr/recover', {
         method: 'POST',
         body: JSON.stringify({
           tableName: selectedTable,
@@ -125,44 +95,7 @@ export default function App() {
           targetTableName
         })
       });
-      const data = await pollOperationUntilDone(start.operationId);
 
-      setStatus(data.message);
-    } catch (error) {
-      setStatus(error.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const replaceCurrentTable = async () => {
-    if (!selectedTable) return;
-
-    if (archiveCurrentTable && !archiveTableName) {
-      setStatus('Provide an archive table name to keep the current state before replacement.');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `This will DELETE and replace ${selectedTable}. Continue?`
-    );
-
-    if (!confirmed) return;
-
-    setLoading(true);
-    setStatus(`Replacing ${selectedTable} with PITR snapshot...`);
-    try {
-      const restoreIsoTime = new Date(restoreTime).toISOString();
-      const start = await api('/api/pitr/replace-current/start', {
-        method: 'POST',
-        body: JSON.stringify({
-          tableName: selectedTable,
-          restoreIsoTime,
-          archiveCurrentTable,
-          archiveTableName: archiveCurrentTable ? archiveTableName : undefined
-        })
-      });
-      const data = await pollOperationUntilDone(start.operationId);
       setStatus(data.message);
     } catch (error) {
       setStatus(error.message);
@@ -215,15 +148,6 @@ export default function App() {
         </label>
 
         <label>
-          Preview comparison source
-          <select value={previewMode} onChange={(event) => setPreviewMode(event.target.value)}>
-            <option value="pitr">PITR restore (creates temporary table)</option>
-            <option value="existing-table">Existing backup table</option>
-          </select>
-        </label>
-
-        {previewMode === 'pitr' ? (
-          <label>
           Restore timestamp
           <input
             type="datetime-local"
@@ -231,26 +155,9 @@ export default function App() {
             onChange={(event) => setRestoreTime(event.target.value)}
           />
         </label>
-        ) : (
-          <label>
-            Existing backup/comparison table
-            <input
-              type="text"
-              placeholder="already-restored-backup-table"
-              value={comparisonTableName}
-              onChange={(event) => setComparisonTableName(event.target.value)}
-            />
-          </label>
-        )}
 
-        <button
-          className="primary"
-          onClick={previewRecovery}
-          disabled={loading || !selectedTable || (previewMode === 'existing-table' && !comparisonTableName)}
-        >
-          {previewMode === 'pitr'
-            ? 'Preview exact differences (creates temporary table)'
-            : 'Preview exact differences (using existing table)'}
+        <button className="primary" onClick={previewRecovery} disabled={loading || !selectedTable}>
+          Preview exact differences (creates temporary table)
         </button>
       </Section>
 
@@ -277,12 +184,10 @@ export default function App() {
             <pre>{JSON.stringify(preview.samples.changed, null, 2)}</pre>
           </details>
 
-          {preview.tempTableName && (
-            <div className="row">
-              <button onClick={cleanupPreviewTable} disabled={loading}>Cleanup temporary preview table</button>
-              <span>{preview.tempTableName}</span>
-            </div>
-          )}
+          <div className="row">
+            <button onClick={cleanupPreviewTable} disabled={loading}>Cleanup temporary preview table</button>
+            <span>{preview.tempTableName}</span>
+          </div>
         </Section>
       )}
 
@@ -298,35 +203,6 @@ export default function App() {
         </label>
         <button className="danger" onClick={recover} disabled={loading || !selectedTable || !targetTableName}>
           Restore now
-        </button>
-      </Section>
-
-      <Section title="4) Replace current table (destructive)">
-        <p className="subtle">
-          DynamoDB cannot restore in-place directly. This action deletes the current table, then restores the PITR
-          snapshot back into the same table name.
-        </p>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={archiveCurrentTable}
-            onChange={(event) => setArchiveCurrentTable(event.target.checked)}
-          />
-          Archive current state first (recommended)
-        </label>
-        {archiveCurrentTable && (
-          <label>
-            Archive table name
-            <input
-              type="text"
-              placeholder={`${selectedTable || 'table'}-pre-replace-${new Date().toISOString().slice(0, 10)}`}
-              value={archiveTableName}
-              onChange={(event) => setArchiveTableName(event.target.value)}
-            />
-          </label>
-        )}
-        <button className="danger" onClick={replaceCurrentTable} disabled={loading || !selectedTable}>
-          Replace current table with selected PITR time
         </button>
       </Section>
 

@@ -44,11 +44,6 @@ button {
   box-sizing: border-box;
 }
 
-input[type='checkbox'] {
-  width: auto;
-  margin-top: 0;
-}
-
 button {
   cursor: pointer;
   font-weight: 700;
@@ -112,11 +107,4 @@ pre {
 
 .subtle {
   color: #4b5563;
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-weight: 600;
 }
